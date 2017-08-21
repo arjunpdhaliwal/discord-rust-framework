@@ -1,0 +1,9 @@
+[package]
+name = "discordrs"
+version = "0.0.1"
+authors = ["Arjun Dhaliwal <arjun.p.dhaliwal@gmail.com>"]
+
+[dependencies]
+futures = "0.1"
+tokio-core = "0.1"
+websocket = "0.20.2"
