@@ -7,7 +7,6 @@ rust:
   - nightly
   - beta
   - stable
-  - 1.0.0
 script:
   - cargo build --verbose
   - cargo test
