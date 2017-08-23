@@ -2,47 +2,107 @@ extern crate websocket;
 extern crate futures;
 extern crate tokio_core;
 
+#[macro_use]
+extern crate serde_derive;
+
+extern crate serde;
+extern crate serde_json;
+
+
+use std::collections::BTreeMap;
+
 use tokio_core::reactor::Core;
 
 use futures::future::Future;
 use futures::Stream;
-use futures::Sink;
+
+use websocket::message::OwnedMessage;
+
 
 mod test;
+mod identity;
+mod dispatch;
+mod gateway;
 
-const DISCORD_GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=6";
+const DISCORD_GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=6&encoding=json";
 
 pub struct Client {
-    tx: websocket::sync::Client<std::boxed::Box<websocket::stream::sync::NetworkStream + std::marker::Send>>,
+    core: tokio_core::reactor::Core,
 }
 
 impl Client {
-    pub fn new() -> Result<i32, ()> {
-        let mut core = Core::new().unwrap();
+    pub fn new() -> Client {
+        let core = Core::new()
+                       .expect("Could not instantiate Client.");
 
+        Client {
+            core,
+        }
+    }
+
+    pub fn authenticate(&mut self, token: String) {
         let socket = websocket::ClientBuilder::new(DISCORD_GATEWAY_URL)
             .expect("Could not construct client.")
             .add_protocol("rust-websocket")
-            .async_connect(None, &core.handle())
+            .async_connect(None, &(&mut self.core).handle())
             .and_then(|(duplex, _)| {
                 let (sink, stream) = duplex.split();
-                stream.filter_map(|message| {
-                    println!("Received Message: {:?}", message);
-                    Some(message)
-                })
-                  .forward(sink)
-            });
-
-
-        core.run(socket).unwrap();
-        Ok(1)
+                stream.filter_map(|message| Client::handle_stream(message, token.clone())) //FIXME: do i really need to clone this?
+                      .forward(sink)
+        });
+        self.core.run(socket)
+                 .expect("Could not connect to websocket.");
     }
 
-    fn send_heartbeat(&self) {
-    }
+    fn handle_stream(message: websocket::OwnedMessage, token: String) -> Option<websocket::OwnedMessage> {
+        let mut properties = BTreeMap::new();
+        properties.insert(String::from("$os"), String::from("Linux"));
 
-    pub fn authenticate() -> Result<i32, i32> {
-        Ok(1)
+        let identity = identity::Data {
+            token,  
+            properties,
+            compress: None,
+            large_threshold: None,
+        };
+
+        let identification_message = identity::Message {
+            op: 2,
+            d: identity,
+        };
+
+        //println!("\nReceived message: {:?}\n", message);
+        if let OwnedMessage::Text(text) = message {
+            let deserialized_dispatch: dispatch::Message = serde_json::from_str(&text)
+                                                                     .expect("Could not parse JSON.");
+            let serialized_data = deserialized_dispatch.d;
+            let title = deserialized_dispatch.t;
+
+           // println!("\nSerialized: {}\n", serialized_data);
+
+            match title {
+                Some(t) => {
+                    let deserialized_data: gateway::Ready = serde_json::from_value(serialized_data)
+                                                                      .expect("Could not parse JSON.");
+                    println!("\nServer: {:#?}\n", deserialized_data);
+                    println!("{}", t);
+                    None
+                }
+                None => {
+                    let deserialized_data: gateway::Hello = serde_json::from_value(serialized_data)
+                                                                      .expect("Could not parse JSON.");
+                    println!("\nServer: {:#?}\n", deserialized_data);
+                    let response = Some(OwnedMessage::Text(
+                        serde_json::to_string(&identification_message)
+                                  .expect("Could not send response.");
+                    ));
+                    println!("\nResponse: {:#?}\n", identification_message);
+
+                    response
+                }
+            }
+        } else {
+            None
+        }
     }
 }
 
