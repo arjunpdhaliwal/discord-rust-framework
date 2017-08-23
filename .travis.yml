@@ -8,5 +8,5 @@ rust:
   - beta
   - stable
 script:
-  - cargo build --verbose
+  - cargo build
   - cargo test
