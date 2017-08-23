@@ -93,10 +93,9 @@ impl Client {
                     println!("\nServer: {:#?}\n", deserialized_data);
                     let response = Some(OwnedMessage::Text(
                         serde_json::to_string(&identification_message)
-                                  .expect("Could not send response.");
+                                  .expect("Could not send response.")
                     ));
                     println!("\nResponse: {:#?}\n", identification_message);
-
                     response
                 }
             }
@@ -105,9 +104,3 @@ impl Client {
         }
     }
 }
-
-
-
-
-
-
