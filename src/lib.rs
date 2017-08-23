@@ -85,7 +85,7 @@ impl Client {
                                                                       .expect("Could not parse JSON.");
                     println!("\nServer: {:#?}\n", deserialized_data);
                     println!("{}", t);
-                    None
+                    Some(OwnedMessage::Close(None))
                 }
                 None => {
                     let deserialized_data: gateway::Hello = serde_json::from_value(serialized_data)
