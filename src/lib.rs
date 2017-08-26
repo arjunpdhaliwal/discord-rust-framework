@@ -20,8 +20,6 @@ use websocket::message::OwnedMessage;
 
 
 mod test;
-mod identity;
-mod dispatch;
 mod gateway;
 
 const DISCORD_GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=6&encoding=json";
@@ -58,21 +56,23 @@ impl Client {
         let mut properties = BTreeMap::new();
         properties.insert(String::from("$os"), String::from("Linux"));
 
-        let identity = identity::Data {
+        let identity = gateway::identity::Identity {
             token,  
             properties,
             compress: None,
             large_threshold: None,
         };
 
-        let identification_message = identity::Message {
+        let identification_message = gateway::Message::<gateway::identity::Identity> {
             op: 2,
             d: identity,
+            s: None,
+            t: None,
         };
 
         //println!("\nReceived message: {:?}\n", message);
         if let OwnedMessage::Text(text) = message {
-            let deserialized_dispatch: dispatch::Message = serde_json::from_str(&text)
+            let deserialized_dispatch: gateway::Message<serde_json::Value> = serde_json::from_str(&text)
                                                                      .expect("Could not parse JSON.");
             let serialized_data = deserialized_dispatch.d;
             let title = deserialized_dispatch.t;
@@ -81,14 +81,14 @@ impl Client {
 
             match title {
                 Some(t) => {
-                    let deserialized_data: gateway::Ready = serde_json::from_value(serialized_data)
+                    let deserialized_data: gateway::ready::Ready = serde_json::from_value(serialized_data)
                                                                       .expect("Could not parse JSON.");
                     println!("\nServer: {:#?}\n", deserialized_data);
                     println!("{}", t);
                     Some(OwnedMessage::Close(None))
                 }
                 None => {
-                    let deserialized_data: gateway::Hello = serde_json::from_value(serialized_data)
+                    let deserialized_data: gateway::hello::Hello = serde_json::from_value(serialized_data)
                                                                       .expect("Could not parse JSON.");
                     println!("\nServer: {:#?}\n", deserialized_data);
                     let response = Some(OwnedMessage::Text(
