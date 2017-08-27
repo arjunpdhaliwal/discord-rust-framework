@@ -6,6 +6,7 @@ authors = ["Arjun Dhaliwal <arjun.p.dhaliwal@gmail.com>"]
 [dependencies]
 futures = "0.1"
 tokio-core = "0.1"
+tokio-pool = "0.1.0"
 websocket = "0.20.2"
 serde = "1.0.11"
 serde_json = "1.0.2"
