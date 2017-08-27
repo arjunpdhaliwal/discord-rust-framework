@@ -11,3 +11,5 @@ pub struct Ready {
     pub session_id: String,
     pub _trace: Vec<String>,
 }
+
+impl super::MessageData for Ready { }

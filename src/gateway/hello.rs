@@ -6,3 +6,5 @@ pub struct Hello {
     pub heartbeat_interval: i32,
     pub _trace: Vec<String>,
 }
+
+impl super::MessageData for Hello { }

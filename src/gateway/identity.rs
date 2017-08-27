@@ -10,3 +10,5 @@ pub struct Identity {
     pub compress: Option<bool>,
     pub large_threshold: Option<i32>,
 }
+
+impl super::MessageData for Identity { }

@@ -17,6 +17,7 @@ use futures::future::Future;
 use futures::Stream;
 
 use websocket::message::OwnedMessage;
+use std::collections::BinaryHeap;
 
 
 mod test;
@@ -26,15 +27,17 @@ const DISCORD_GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=6&encoding=json";
 
 pub struct Client {
     core: tokio_core::reactor::Core,
+    message_queue: BinaryHeap<gateway::ClientMessage>,
 }
 
 impl Client {
     pub fn new() -> Client {
         let core = Core::new()
                        .expect("Could not instantiate Client.");
-
+        let message_queue = BinaryHeap::<gateway::ClientMessage>::new();
         Client {
             core,
+            message_queue,
         }
     }
 
@@ -45,8 +48,8 @@ impl Client {
             .async_connect(None, &(&mut self.core).handle())
             .and_then(|(duplex, _)| {
                 let (sink, stream) = duplex.split();
-                stream.filter_map(|message| Client::handle_stream(message, token.clone())) //FIXME: do i really need to clone this?
-                      .forward(sink)
+                let a = stream.filter_map(|message| Client::handle_stream(message, token.clone())); //FIXME: do i really need to clone this?
+                a.forward(sink)
         });
         self.core.run(socket)
                  .expect("Could not connect to websocket.");
@@ -63,40 +66,46 @@ impl Client {
             large_threshold: None,
         };
 
-        let identification_message = gateway::Message::<gateway::identity::Identity> {
+        let identification_message_body = gateway::MessageBody {
             op: 2,
             d: identity,
             s: None,
             t: None,
         };
 
-        //println!("\nReceived message: {:?}\n", message);
+        let identification_message = gateway::ClientMessage {
+            body: serde_json::to_string(&identification_message_body)
+                                 .expect("Could not serialize response."),
+            priority: 0,
+        };
+
         if let OwnedMessage::Text(text) = message {
-            let deserialized_dispatch: gateway::Message<serde_json::Value> = serde_json::from_str(&text)
+            let deserialized_dispatch: gateway::ServerMessage = serde_json::from_str(&text)
                                                                      .expect("Could not parse JSON.");
             let serialized_data = deserialized_dispatch.d;
             let title = deserialized_dispatch.t;
 
-           // println!("\nSerialized: {}\n", serialized_data);
-
             match title {
                 Some(t) => {
-                    let deserialized_data: gateway::ready::Ready = serde_json::from_value(serialized_data)
+                    match t.trim() {
+                        "READY" => {
+                            let deserialized_data: gateway::ready::Ready = serde_json::from_value(serialized_data)
                                                                       .expect("Could not parse JSON.");
-                    println!("\nServer: {:#?}\n", deserialized_data);
-                    println!("{}", t);
-                    Some(OwnedMessage::Close(None))
+                            println!("\nServer: {:#?}\n", deserialized_data);
+                            Some(OwnedMessage::Close(None))
+                        }
+                        _ => {
+                            None
+                        }
+                    }
+                    
                 }
                 None => {
                     let deserialized_data: gateway::hello::Hello = serde_json::from_value(serialized_data)
                                                                       .expect("Could not parse JSON.");
                     println!("\nServer: {:#?}\n", deserialized_data);
-                    let response = Some(OwnedMessage::Text(
-                        serde_json::to_string(&identification_message)
-                                  .expect("Could not send response.")
-                    ));
-                    println!("\nResponse: {:#?}\n", identification_message);
-                    response
+                    println!("\nResponse: {:#?}\n", identification_message_body);
+                    Some(OwnedMessage::Text(identification_message.body))
                 }
             }
         } else {
