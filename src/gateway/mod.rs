@@ -15,6 +15,12 @@ pub struct MessageBody<T: MessageData> {
     pub t: Option<String>,
 }
 
+#[derive(Serialize, Debug)]
+pub struct HeartbeatMessageBody<T> {
+    pub op: i8,
+    pub d: T,
+}
+
 #[derive(Ord, PartialOrd, Eq, PartialEq, Serialize, Debug)]
 pub struct ClientMessage {
     pub body: String,
