@@ -21,6 +21,7 @@ use futures::future::Future;
 use futures::Stream;
 use futures::Sink;
 use futures::stream;
+use futures::sync::mpsc;
 use futures_cpupool::CpuPool;
 
 use websocket::message::OwnedMessage;
@@ -44,7 +45,7 @@ pub struct Client {
 impl Client {
     pub fn new(token: String) -> Client {
         let core = Core::new().expect("Could not create event loop core.");
-        let pool = CpuPool::new(4);
+        let pool = CpuPool::new(5);
         let message_queue = Arc::new(Mutex::new(BinaryHeap::<gateway::ClientMessage>::new()));
 
         Client::gateway_autenticate(token.clone(), message_queue.clone());
@@ -61,68 +62,99 @@ impl Client {
         let queue_ref2 = self.message_queue.clone();
         let pool = self.pool.clone();
 
-        info!("\nAuthenticating\n");
-        let event_loop = self.pool.spawn_fn(move || {
-            info!("\nSpawned core loop\n");
+        let handle = self.core.handle();
+        let socket = websocket::ClientBuilder::new(DISCORD_GATEWAY_URL)
+            .expect("Could not construct client.")
+            .add_protocol("rust-websocket")
+            .async_connect(None, &handle)
+            .and_then(move |(duplex, _)| {
+                let (tx, rx) = duplex.split();
+                println!("\nConnected to websocket\n");
+                let inner_pool = pool.clone();
+                let mut core = Core::new().expect("Could not create event loop core.");
+                let (ready_sender, ready_receiver) = mpsc::unbounded::<&str>();
+                let (message_sender, message_receiver) = mpsc::unbounded::<String>();
 
-            let mut core = Core::new().expect("Could not create event loop core.");
-            let handle = core.handle();
-            let socket = websocket::ClientBuilder::new(DISCORD_GATEWAY_URL)
-                    .expect("Could not construct client.")
-                    .add_protocol("rust-websocket")
-                    .async_connect(None, &handle)
-                    .and_then(move |(duplex, _)| {
-                        let (tx, rx) = duplex.split();
-                        info!("\nConnected to websocket\n");
-                        let inner_pool = pool.clone();
+                let rx_worker = pool.spawn_fn(move || {
+                    println!("\nReceiving worker is live\n");
+                    rx.for_each(move |message| {
+                        println!("\nGot a message\n");
+                        let queue_ref = &queue_ref1;
+                        let inner_queue = queue_ref.clone();
+                        let worker_channel = ready_sender.clone();
 
-                        let mut rx_core = Core::new().expect("Could not create event loop core.");
-                        let rx_worker = pool.spawn_fn(move || {
-                            info!("\nReceiving worker is live\n");
-                            rx.for_each(move |message| {
-                                info!("\nGot a message\n");
-                                let queue_ref = &queue_ref1;
-                                let inner_queue = queue_ref.clone();
-
-                                let mut rx_handling_core = Core::new().expect("Could not create event loop core.");
-                                let message_handling = inner_pool.spawn_fn(move || {
-                                    info!("\nHandling a message in a new thread\n");
-                                    Client::handle_stream(message, inner_queue).map_err(|_| ())
-                                });
-                                rx_handling_core.run(message_handling);
-
-                                let g: Result<(), websocket::WebSocketError> = Ok(());
-                                g
+                        //let mut rx_handling_core = Core::new().expect("Could not create event loop core.");
+                        let message_handler = inner_pool.spawn_fn(move || {
+                            println!("\nHandling a message in a new thread\n");
+                            Client::handle_stream(message, inner_queue);
+                            println!("\nSending ready\n");
+                            worker_channel.send("ready").map_err(|err| {
+                                ()
+                            }).map(|result| {
+                                ()
                             })
+                        }).map_err(|e| {
+                            websocket::WebSocketError::NoDataAvailable //FIXME: hack
+                        }).map(|result| {
+                            ()
                         });
-                        rx_core.run(rx_worker);
+                        //rx_handling_core.run(message_handler);
 
-                        let mut tx_core = Core::new().expect("Could not create event loop core.");
-                        let tx_worker = pool.spawn_fn(move || {
-                            info!("\nTransmitting worker is live\n");
-                            let queue_ref = &queue_ref2;
-                            let mut queue = queue_ref.lock().unwrap();
-                            let mut messages = Vec::<Result<OwnedMessage, websocket::WebSocketError>>::new();
+                        
+                        message_handler
+                        //let all_ok: Result<(), websocket::WebSocketError> = Ok(());
+                        //all_ok
+                    }).map_err(|e| {
+                        websocket::WebSocketError::NoDataAvailable //FIXME: hack
+                    }).map(|result| {
+                        ()
+                    })
+                });
 
-                            while let Some(message) = queue.pop() {
-                                &messages.push(Ok(OwnedMessage::Text(message.body)));
-                            }
+                let tx_stream_worker = pool.spawn_fn(move || {
+                    println!("\nFiltering worker is live\n");
+                    let inner_message_sender = message_sender;
+                    ready_receiver.for_each(move |message| {
+                        println!("\nReceiving ready\n");
 
-                            let messages_wrapped = messages.into_iter();
-                            stream::iter(messages_wrapped).forward(tx)
-                        });
-                        tx_core.run(tx_worker);
+                        let queue_ref = &queue_ref2;
+                        let mut queue = queue_ref.lock().unwrap();
+                        let mut messages = Vec::<Result<String, mpsc::SendError<String>>>::new();
 
-                        let g: Result<(), websocket::WebSocketError> = Ok(());
-                        g
-                    });
-            
-            core.run(socket);
+                        while let Some(message) = queue.pop() {
+                            println!("\nPopping a message off the queue\n");
+                            &messages.push(Ok(message.body));
+                        }
 
-            let g: Result<(), websocket::WebSocketError> = Ok(());
-            g
-        });
-        self.core.run(event_loop);
+                        let message_stream = messages.into_iter();
+                        stream::iter(message_stream)
+                            .forward(inner_message_sender.clone())
+                            .map_err(|e| {
+                                () //FIXME: hack
+                            }).map(|result| {
+                                ()
+                            })
+                    }).map_err(|e| {
+                        websocket::WebSocketError::NoDataAvailable //FIXME: hack
+                    }).map(|result| {
+                        ()
+                    })
+                });
+
+                let tx_worker = pool.spawn_fn(move || {
+                    println!("\nTransmitting worker is live\n");
+                    message_receiver.map(|message| { 
+                        OwnedMessage::Text(message)
+                    })
+                    .map_err(|_| { websocket::WebSocketError::NoDataAvailable })
+                    .forward(tx)
+                });
+
+                //rx_worker
+                rx_worker.join(tx_stream_worker.join(tx_worker))
+            });
+        
+        self.core.run(socket);
     }
 
     fn gateway_autenticate(token: String, message_queue: Arc<Mutex<BinaryHeap<gateway::ClientMessage>>>) {
@@ -169,10 +201,11 @@ impl Client {
                         "READY" => {
                             let deserialized_data: gateway::ready::Ready = serde_json::from_value(serialized_data)
                                                                       .expect("Could not parse JSON.");
-                            info!("\nServer: READY\n");
+                            println!("\nServer: READY\n");
                             Ok(())
                         }
                         _ => {
+                            println!("\nUnknown server message\n");
                             Ok(())
                         }
                     }
@@ -181,11 +214,12 @@ impl Client {
                 None => {
                     let deserialized_data: gateway::hello::Hello = serde_json::from_value(serialized_data)
                                                                       .expect("Could not parse JSON.");
-                    info!("\nServer: IDENTIFY\n");
+                    println!("\nServer: IDENTIFY\n");
                     Ok(())
                 }
             }
         } else {
+            println!("\nUnknown server message format\n");
             Ok(())
         }
     }
