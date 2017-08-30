@@ -18,6 +18,9 @@ use std::collections::BTreeMap;
 use tokio_core::reactor::Core;
 
 use futures::future::Future;
+use futures::future::Loop;
+use futures::future::LoopFn;
+use futures::future::loop_fn;
 use futures::Stream;
 use futures::Sink;
 use futures::stream;
@@ -29,7 +32,7 @@ use websocket::message::OwnedMessage;
 use std::collections::BinaryHeap;
 use std::sync::Mutex;
 use std::sync::Arc;
-
+use std::{thread, time};
 
 mod test;
 mod gateway;
@@ -45,7 +48,7 @@ pub struct Client {
 impl Client {
     pub fn new(token: String) -> Client {
         let core = Core::new().expect("Could not create event loop core.");
-        let pool = CpuPool::new(5);
+        let pool = CpuPool::new(7);
         let message_queue = Arc::new(Mutex::new(BinaryHeap::<gateway::ClientMessage>::new()));
 
         Client::gateway_autenticate(token.clone(), message_queue.clone());
@@ -60,6 +63,7 @@ impl Client {
     pub fn authenticate(&mut self) {
         let queue_ref1 = self.message_queue.clone();
         let queue_ref2 = self.message_queue.clone();
+        let queue_ref3 = self.message_queue.clone();
         let pool = self.pool.clone();
 
         let handle = self.core.handle();
@@ -74,6 +78,10 @@ impl Client {
                 let mut core = Core::new().expect("Could not create event loop core.");
                 let (ready_sender, ready_receiver) = mpsc::unbounded::<&str>();
                 let (message_sender, message_receiver) = mpsc::unbounded::<String>();
+                let (heartbeat_trigger_sender, heartbeat_trigger_receiver) = mpsc::unbounded();
+                let (heartbeat_control_sender, heartbeat_control_receiver) = std::sync::mpsc::channel::<String>();
+
+                let heartbeat_ready_sender = ready_sender.clone();
 
                 let rx_worker = pool.spawn_fn(move || {
                     println!("\nReceiving worker is live\n");
@@ -83,7 +91,6 @@ impl Client {
                         let inner_queue = queue_ref.clone();
                         let worker_channel = ready_sender.clone();
 
-                        //let mut rx_handling_core = Core::new().expect("Could not create event loop core.");
                         let message_handler = inner_pool.spawn_fn(move || {
                             println!("\nHandling a message in a new thread\n");
                             Client::handle_stream(message, inner_queue);
@@ -98,12 +105,8 @@ impl Client {
                         }).map(|result| {
                             ()
                         });
-                        //rx_handling_core.run(message_handler);
-
                         
                         message_handler
-                        //let all_ok: Result<(), websocket::WebSocketError> = Ok(());
-                        //all_ok
                     }).map_err(|e| {
                         websocket::WebSocketError::NoDataAvailable //FIXME: hack
                     }).map(|result| {
@@ -118,7 +121,7 @@ impl Client {
                         println!("\nReceiving ready\n");
 
                         let queue_ref = &queue_ref2;
-                        let mut queue = queue_ref.lock().unwrap();
+                        let mut queue = queue_ref.lock().expect("Could not get lock on queue.");
                         let mut messages = Vec::<Result<String, mpsc::SendError<String>>>::new();
 
                         while let Some(message) = queue.pop() {
@@ -143,25 +146,60 @@ impl Client {
 
                 let tx_worker = pool.spawn_fn(move || {
                     println!("\nTransmitting worker is live\n");
-                    message_receiver.map(|message| { 
+                    message_receiver.map(|message| {              
+                        println!("\nSending a message\n");
                         OwnedMessage::Text(message)
                     })
                     .map_err(|_| { websocket::WebSocketError::NoDataAvailable })
                     .forward(tx)
                 });
 
-                //rx_worker
-                rx_worker.join(tx_stream_worker.join(tx_worker))
+                let heartbeat_worker = pool.spawn_fn(move || {
+                    loop_fn((heartbeat_trigger_sender, heartbeat_control_receiver), move |(trigger_channel, control)| {
+                        if control.try_recv().is_err() {
+                            let trigger_channel_next = trigger_channel.clone();
+
+                            println!("\nSending heartbeat...\n");
+                            trigger_channel.send("trigger").wait();
+
+                            thread::sleep(time::Duration::from_secs(5));
+                            Ok(Loop::Continue((trigger_channel_next, control)))
+                        } else {
+                            Ok(Loop::Break(()))
+                        }
+                    })
+                });
+
+                let heartbeat_sender_worker = pool.spawn_fn(move || { //required as LoopFn does not unlock the mutex
+                    let queue_ref = queue_ref3;
+                    let worker_channel = heartbeat_ready_sender;
+                    heartbeat_trigger_receiver.for_each(move |message| {
+                        let inner_queue_ref = queue_ref.clone();
+                        let mut queue = inner_queue_ref.lock().expect("Could not get lock on queue.");
+                        worker_channel.clone().send("ready").map_err(|e| {
+                            ()
+                        }).map(|result| {
+                            ()
+                        })
+                    }).map_err(|e| {
+                        websocket::WebSocketError::NoDataAvailable //FIXME: hack
+                    }).map(|result| {
+                        ()
+                    })
+                });
+
+                rx_worker.join4(tx_stream_worker, tx_worker, heartbeat_worker.join(heartbeat_sender_worker))
             });
         
         self.core.run(socket);
     }
 
     fn gateway_autenticate(token: String, message_queue: Arc<Mutex<BinaryHeap<gateway::ClientMessage>>>) {
-        let mut queue = message_queue.lock().unwrap();
+        let mut queue = message_queue.lock().expect("Could not get lock on queue.");
 
         let mut properties = BTreeMap::new();
         properties.insert(String::from("$os"), String::from("Linux"));
+
 
         let identity = gateway::identity::Identity {
             token,  
@@ -187,7 +225,7 @@ impl Client {
     }
 
     fn handle_stream(message: websocket::OwnedMessage, message_queue: Arc<Mutex<BinaryHeap<gateway::ClientMessage>>>) -> Result<(), websocket::WebSocketError> {
-        let mut queue = message_queue.lock().unwrap();
+        let mut queue = message_queue.lock().expect("Could not get lock on queue.");
 
         if let OwnedMessage::Text(text) = message {
             let deserialized_dispatch: gateway::ServerMessage = serde_json::from_str(&text)
@@ -201,11 +239,11 @@ impl Client {
                         "READY" => {
                             let deserialized_data: gateway::ready::Ready = serde_json::from_value(serialized_data)
                                                                       .expect("Could not parse JSON.");
-                            println!("\nServer: READY\n");
+                            println!("\nServer: READY\n {:?} \n", deserialized_data);
                             Ok(())
                         }
                         _ => {
-                            println!("\nUnknown server message\n");
+                            println!("\nUnknown server message\n {:?} \n", serialized_data);
                             Ok(())
                         }
                     }
@@ -214,7 +252,7 @@ impl Client {
                 None => {
                     let deserialized_data: gateway::hello::Hello = serde_json::from_value(serialized_data)
                                                                       .expect("Could not parse JSON.");
-                    println!("\nServer: IDENTIFY\n");
+                    println!("\nServer: HELLO:\n {:?} \n", deserialized_data);
                     Ok(())
                 }
             }
