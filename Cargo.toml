@@ -2,6 +2,8 @@
 name = "discord_rust_framework"
 version = "0.0.1"
 authors = ["Arjun Dhaliwal <arjun.p.dhaliwal@gmail.com>"]
+description = "A very high-level library for creating simple bots for Discord."
+license = "MIT"
 
 [dependencies]
 futures = "0.1"
