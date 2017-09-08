@@ -2,6 +2,8 @@ extern crate websocket;
 extern crate futures;
 extern crate futures_cpupool;
 extern crate tokio_core;
+extern crate reqwest;
+extern crate hyper;
 
 
 #[macro_use]
@@ -18,12 +20,14 @@ use std::collections::BTreeMap;
 use tokio_core::reactor::Core;
 
 use futures::future::Future;
-use futures::future::{Loop, LoopFn, loop_fn};
+use futures::future::{Loop, loop_fn};
 use futures::{Stream, Sink, stream};
 use futures::sync::mpsc;
 use futures_cpupool::CpuPool;
 
 use websocket::message::OwnedMessage;
+
+use hyper::header::{Headers, Authorization};
 
 use std::collections::BinaryHeap;
 use std::sync::{Mutex, Arc};
@@ -32,39 +36,70 @@ use std::{thread, time};
 
 mod test;
 mod gateway;
+mod api;
 
 const DISCORD_GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=6&encoding=json";
 
-pub struct Client {
+pub struct Client<F> {
     core: Core,
+    http: Arc<Mutex<reqwest::Client>>,
     pool: Arc<CpuPool>,
     message_queue: Arc<Mutex<BinaryHeap<gateway::ClientMessage>>>,
     seq: Arc<AtomicUsize>,
+    message_handler: Arc<Mutex<F>>,
+    token: String,
+    user_id: String,
 }
 
-impl Client {
-    pub fn new(token: String) -> Client {
+impl<F> Client<F> where F: Fn(&str) -> Option<String> + Send + Sync + 'static {
+    pub fn new(token: String, message_handler: F) -> Client<F> {
         let core = Core::new().expect("Could not create event loop core.");
         let pool = CpuPool::new(7);
         let message_queue = Arc::new(Mutex::new(BinaryHeap::<gateway::ClientMessage>::new()));
         let seq = Arc::new(AtomicUsize::new(0));
+        let http = reqwest::Client::new().expect("Could not create HTTP client.");
 
-        Client::gateway_autenticate(token.clone(), message_queue.clone());
+        let me_api_url = "https://discordapp.com/api/users/@me";
+
+        let mut auth_header = String::from("Bot ");
+        auth_header.push_str(&*token);
+        let mut req_headers = Headers::new();
+        req_headers.set(Authorization(auth_header));
+
+        let mut res = http.get(me_api_url)
+                      .expect("Could not start GET request.")
+                      .headers(req_headers)
+                      .send()
+                      .expect("Could not send HTTP request.");
+
+        let deserialized_response: api::User = res.json().expect("Could not parse response JSON.");
+        let user_id = deserialized_response.id;
+
+        Client::<F>::gateway_autenticate(token.clone(), message_queue.clone());
 
         Client {
             core,
+            http: Arc::new(Mutex::new(http)),
             pool: Arc::new(pool),
             message_queue,
             seq,
+            message_handler: Arc::new(Mutex::new(message_handler)),
+            token,
+            user_id,
         }
     }
 
-    pub fn authenticate(&mut self) {
+    #[allow(unused_variables)]
+    #[allow(unused_must_use)]
+    pub fn connect(&mut self) {
         let queue_ref1 = self.message_queue.clone();
         let queue_ref2 = self.message_queue.clone();
-        let queue_ref3 = self.message_queue.clone();
         let seq_ref1 = self.seq.clone();
         let seq_ref2 = self.seq.clone();
+        let handler_ref = self.message_handler.clone();
+        let http_ref = self.http.clone();
+        let token = self.token.clone();
+        let user_id = self.user_id.clone();
         let pool = self.pool.clone();
 
         let handle = self.core.handle();
@@ -74,9 +109,8 @@ impl Client {
             .async_connect(None, &handle)
             .and_then(move |(duplex, _)| {
                 let (tx, rx) = duplex.split();
-                println!("\nConnected to websocket\n");
+                info!("\nConnected to websocket\n");
                 let inner_pool = pool.clone();
-                let mut core = Core::new().expect("Could not create event loop core.");
                 let (ready_sender, ready_receiver) = mpsc::unbounded::<&str>();
                 let (message_sender, message_receiver) = mpsc::unbounded::<String>();
                 let (heartbeat_trigger_sender, heartbeat_trigger_receiver) = mpsc::unbounded();
@@ -85,72 +119,74 @@ impl Client {
                 let heartbeat_ready_sender = ready_sender.clone();
 
                 let rx_worker = pool.spawn_fn(move || {
-                    println!("\nReceiving worker is live\n");
+                    info!("\nReceiving worker is live\n");
                     rx.for_each(move |message| {
-                        println!("\nGot a message\n");
-                        let queue_ref = &queue_ref1;
+                        info!("\nGot a message\n");
                         let seq_ref = &seq_ref1;
-                        let inner_queue = queue_ref.clone();
                         let inner_seq = seq_ref.clone();
                         let worker_channel = ready_sender.clone();
+                        let inner_handler_ref = handler_ref.clone();
+                        let inner_http_ref = http_ref.clone();
+                        let inner_token = token.clone();
+                        let inner_user_id = user_id.clone();
 
                         let message_handler = inner_pool.spawn_fn(move || {
-                            println!("\nHandling a message in a new thread\n");
-                            Client::handle_stream(message, inner_queue, inner_seq);
-                            println!("\nSending ready\n");
+                            info!("\nHandling a message in a new thread\n");
+                            Client::<F>::handle_stream(message, inner_seq, inner_handler_ref.clone(), inner_http_ref.clone(), inner_token.clone(), inner_user_id.clone());
+                            info!("\nSending ready\n");
                             worker_channel.send("ready").map_err(|err| {
                                 ()
                             }).map(|result| {
                                 ()
                             })
                         }).map_err(|e| {
-                            websocket::WebSocketError::NoDataAvailable //FIXME: hack
+                            websocket::WebSocketError::NoDataAvailable
                         }).map(|result| {
                             ()
                         });
                         
                         message_handler
                     }).map_err(|e| {
-                        websocket::WebSocketError::NoDataAvailable //FIXME: hack
+                        websocket::WebSocketError::NoDataAvailable
                     }).map(|result| {
                         ()
                     })
                 });
 
                 let tx_stream_worker = pool.spawn_fn(move || {
-                    println!("\nFiltering worker is live\n");
+                    info!("\nFiltering worker is live\n");
                     let inner_message_sender = message_sender;
                     ready_receiver.for_each(move |message| {
-                        println!("\nReceiving ready\n");
+                        info!("\nReceiving ready\n");
 
-                        let queue_ref = &queue_ref2;
+                        let queue_ref = &queue_ref1;
                         let mut queue = queue_ref.lock().expect("Could not get lock on queue.");
                         let mut messages = Vec::<Result<String, mpsc::SendError<String>>>::new();
 
                         while let Some(message) = queue.pop() {
-                            println!("\nPopping a message off the queue\n");
+                            info!("\nPopping a message off the queue\n");
                             &messages.push(Ok(message.body));
-                        }
+                         }
 
                         let message_stream = messages.into_iter();
                         stream::iter(message_stream)
                             .forward(inner_message_sender.clone())
                             .map_err(|e| {
-                                () //FIXME: hack
+                                () 
                             }).map(|result| {
                                 ()
                             })
                     }).map_err(|e| {
-                        websocket::WebSocketError::NoDataAvailable //FIXME: hack
+                        websocket::WebSocketError::NoDataAvailable
                     }).map(|result| {
                         ()
                     })
                 });
 
                 let tx_worker = pool.spawn_fn(move || {
-                    println!("\nTransmitting worker is live\n");
+                    info!("\nTransmitting worker is live\n");
                     message_receiver.map(|message| {              
-                        println!("\nSending a message\n");
+                        info!("\nSending a message\n");
                         OwnedMessage::Text(message)
                     })
                     .map_err(|_| { websocket::WebSocketError::NoDataAvailable })
@@ -162,7 +198,7 @@ impl Client {
                         if control.try_recv().is_err() {
                             let trigger_channel_next = trigger_channel.clone();
 
-                            println!("\nSending heartbeat...\n");
+                            info!("\nSending heartbeat...\n");
                             trigger_channel.send("trigger").wait();
 
                             thread::sleep(time::Duration::from_secs(5));
@@ -174,7 +210,7 @@ impl Client {
                 });
 
                 let heartbeat_sender_worker = pool.spawn_fn(move || { //required as LoopFn does not unlock the mutex
-                    let queue_ref = queue_ref3;
+                    let queue_ref = queue_ref2;
                     let seq_ref = seq_ref2;
                     let worker_channel = heartbeat_ready_sender;
                     heartbeat_trigger_receiver.for_each(move |message| {
@@ -217,7 +253,7 @@ impl Client {
                             ()
                         })
                     }).map_err(|e| {
-                        websocket::WebSocketError::NoDataAvailable //FIXME: hack
+                        websocket::WebSocketError::NoDataAvailable
                     }).map(|result| {
                         ()
                     })
@@ -259,8 +295,9 @@ impl Client {
         queue.push(identification_message);
     }
 
-    fn handle_stream(message: websocket::OwnedMessage, message_queue: Arc<Mutex<BinaryHeap<gateway::ClientMessage>>>, seq_num: Arc<AtomicUsize>) {
-        let mut queue = message_queue.lock().expect("Could not get lock on queue.");
+    fn handle_stream(message: websocket::OwnedMessage, seq_num: Arc<AtomicUsize>, handle_message: Arc<Mutex<F>>, http: Arc<Mutex<reqwest::Client>>, token: String, user_id: String) {
+        let handler = handle_message.lock().expect("Could not get lock on message handling closure.");
+        let http = http.lock().expect("Could not get lock on HTTP client.");
 
         if let OwnedMessage::Text(text) = message {
             let deserialized_dispatch: gateway::ServerMessage = serde_json::from_str(&text)
@@ -277,11 +314,45 @@ impl Client {
                     match t.trim() {
                         "READY" => {
                             let deserialized_data: gateway::ready::Ready = serde_json::from_value(serialized_data)
-                                                                      .expect("Could not parse JSON.");
-                            println!("\nServer: READY\n {:?} \n", deserialized_data);
+                                                                                     .expect("Could not parse JSON.");
+                            info!("\nServer: READY\n {:?} \n", deserialized_data);
+                        }
+                        "MESSAGE_CREATE" => {
+                            let deserialized_data: gateway::discord_message::DiscordMessage = serde_json::from_value(serialized_data)
+                                                                                                        .expect("Could not parse JSON.");
+                            info!("\nServer: MESSAGE_CREATE\n {:?} \n", deserialized_data);
+
+                            if deserialized_data.author.id != user_id {
+                                let channel_id = deserialized_data.channel_id;
+                                let handled_response = handler(&*deserialized_data.content);
+
+                                if let Some(response) = handled_response {
+                                    let mut channels_api_url = String::from("https://discordapp.com/api/channels/");
+                                    channels_api_url.push_str(&channel_id);
+                                    channels_api_url.push_str("/messages");
+                                    let channels_api_url_str = &*channels_api_url;
+
+                                    let mut json_data = BTreeMap::new();
+                                    json_data.insert("content", response);
+
+                                    let mut auth_header = String::from("Bot ");
+                                    auth_header.push_str(&*token);
+                                    let mut req_headers = Headers::new();
+                                    req_headers.set(Authorization(auth_header));
+
+                                    let res = http.post(channels_api_url_str)
+                                                    .expect("Could not start POST request.")
+                                                    .headers(req_headers)
+                                                    .json(&json_data)
+                                                    .expect("Could not parse JSON request.")
+                                                    .send();
+                                    info!("Discord API Response: {:?}", res);
+                                }
+                            }
                         }
                         _ => {
-                            println!("\nUnknown server message\n {:?} \n", serialized_data);
+                            info!("\nUnknown server message\n {} \n", t);
+                            info!("\nUnknown server message\n {:?} \n", serialized_data);
                         }
                     }
                     
@@ -291,19 +362,19 @@ impl Client {
                         10 => {
                             let deserialized_data: gateway::hello::Hello = serde_json::from_value(serialized_data)
                                                                               .expect("Could not parse JSON.");
-                            println!("\nServer: HELLO:\n {:?} \n", deserialized_data);
+                            info!("\nServer: HELLO:\n {:?} \n", deserialized_data);
                         }
                         11 => {
-                            println!("\nServer: Heartbeat acknowledged\n");
+                            info!("\nServer: Heartbeat acknowledged\n");
                         }
                         _ => {
-                            println!("\nUnknown opcode\n");
+                            info!("\nUnknown opcode\n");
                         }
                     }
                 }
             }
         } else {
-            println!("\nUnknown server message format\n");
+            info!("\nUnknown server message format\n");
         }
     }
 }

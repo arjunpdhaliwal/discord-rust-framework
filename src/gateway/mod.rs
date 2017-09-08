@@ -4,6 +4,7 @@ extern crate serde_json;
 pub mod hello;
 pub mod ready;
 pub mod identity;
+pub mod discord_message;
 
 pub trait MessageData { }
 
