@@ -91,6 +91,7 @@ impl<F> Client<F> where F: Fn(&str) -> Option<String> + Send + Sync + 'static {
 
     #[allow(unused_variables)]
     #[allow(unused_must_use)]
+    #[allow(deprecated)]
     pub fn connect(&mut self) {
         let queue_ref1 = self.message_queue.clone();
         let queue_ref2 = self.message_queue.clone();

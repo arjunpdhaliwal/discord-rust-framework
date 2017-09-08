@@ -1,5 +1,5 @@
 [package]
-name = "discord-rust-framework"
+name = "discord_rust_framework"
 version = "0.0.1"
 authors = ["Arjun Dhaliwal <arjun.p.dhaliwal@gmail.com>"]
 
