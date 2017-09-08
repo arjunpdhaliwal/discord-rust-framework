@@ -2,4 +2,17 @@
 Framework for communication with the Discord Gateway over websockets.
 
 ### Usage:
-Run tests with `cargo test`. To observe the handshake, run tests with `cargo test -- --nocapture`. 
+```rs
+extern crate discord_rust_framework;
+
+fn main() {
+    discord_rust_framework::Client::new(String::from(INSERT_TOKEN_HERE), |message| {
+        match message {
+            "ping" => Some(String::from("pong")),
+            _ => None
+        }
+    }).connect();
+}
+```
+
+Run tests with `cargo test`.
