@@ -1,5 +1,5 @@
 # discord-rust-framework
-Framework for communication with the Discord Gateway over websockets.
+Framework for communication with the Discord Gateway over websockets using Rust.
 
 ### Usage:
 ```rs
