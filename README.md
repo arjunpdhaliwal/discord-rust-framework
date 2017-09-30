@@ -15,4 +15,4 @@ fn main() {
 }
 ```
 
-Run tests with `cargo test`.r
+Run tests with `cargo test`.
