@@ -1,5 +1,5 @@
 # discord-rust-framework
-Framework for communication with the Discord Gateway over websockets.
+Framework for communication with the Discord Gateway over websockets using rust.
 
 ### Usage:
 ```rs
@@ -15,4 +15,4 @@ fn main() {
 }
 ```
 
-Run tests with `cargo test`.
+Run tests with `cargo test`.r
